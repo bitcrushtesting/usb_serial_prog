@@ -1,0 +1,29 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -4
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Keep the one-line accessors that make the driver interfaces readable.
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+InsertBraces: true
+
+FixNamespaceComments: true
+NamespaceIndentation: None
+
+# The header a .cpp implements comes first, then our own headers, then the
+# system ones.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+BreakBeforeBinaryOperators: None
+SpaceAfterTemplateKeyword: false
+---

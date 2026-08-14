@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# usb_serial_prog - configuration EEPROM programmer for USB serial chips
+# Copyright (C) 2026 Bitcrush Testing
+#
+# Builds a binary for each supported platform when a version tag is pushed and
+# attaches the archives to the GitHub release for that tag.
+#
+#   git tag -a v0.2.0 -m 'usbprog 0.2.0' && git push origin v0.2.0
+#
+# The tag is the authority on the version; it is passed to CMake, so the
+# reported version always matches the release even if the version in
+# CMakeLists.txt was not bumped.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An older Ubuntu means an older glibc, so the binary also runs on
+          # distributions that are not the latest.
+          - target: linux-x86_64
+            os: ubuntu-22.04
+          # ARM Linux runners need a public repository or a plan that includes
+          # them; drop this entry if the job cannot find a runner.
+          - target: linux-arm64
+            os: ubuntu-22.04-arm
+          - target: macos-arm64
+            os: macos-latest
+          # For an Intel macOS build add a job on an Intel runner label; there
+          # is no cross build, because Homebrew only has the native libusb.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=usbprog-$version-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libusb-1.0-0-dev libudev-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libusb
+
+      - name: Build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSBPROG_WERROR=ON \
+            -DUSBPROG_STATIC_LIBUSB=ON \
+            -DUSBPROG_VERSION_OVERRIDE=${{ steps.version.outputs.version }}
+          cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Check the binary reports the tagged version
+        run: |
+          ./build/usbprog --version
+          ./build/usbprog --version | grep -qF "${{ steps.version.outputs.version }}"
+
+      - name: Package
+        run: |
+          name="${{ steps.version.outputs.name }}"
+          mkdir -p "dist/$name"
+          cp build/usbprog README.md LICENSE "dist/$name/"
+          cp packaging/60-usbprog.rules "dist/$name/"
+          strip "dist/$name/usbprog" || true
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          rm -rf "dist/$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.name }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: package
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz | tee SHA256SUMS
+
+      # The tag may already have a release (created through the web interface),
+      # in which case the archives are added to it rather than a second one.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "usbprog ${GITHUB_REF_NAME#v}" \
+              --generate-notes \
+              dist/*
+          fi

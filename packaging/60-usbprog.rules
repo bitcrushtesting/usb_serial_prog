@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# usb_serial_prog - configuration EEPROM programmer for USB serial chips
+# Copyright (C) 2026 Bitcrush Testing
+
+# Let ordinary users reprogram the configuration EEPROM of USB serial chips.
+#
+# Install to /etc/udev/rules.d/60-usbprog.rules, then:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# TAG+="uaccess" grants access to the user logged in at the seat, which is what
+# you want on a desktop. The GROUP/MODE pair covers headless machines, where
+# adding yourself to the plugdev group is the usual arrangement.
+
+# FTDI (FT232R, FT-X, ...)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", MODE="0664", GROUP="plugdev", TAG+="uaccess"
+
+# Add a line like this after reprogramming a chip to a custom vendor ID:
+# SUBSYSTEM=="usb", ATTR{idVendor}=="1234", MODE="0664", GROUP="plugdev", TAG+="uaccess"

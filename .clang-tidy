@@ -1,0 +1,97 @@
+---
+# Checks are grouped by why they earn their place here. Anything switched off
+# below fired on code that reads fine as written, or contradicts a deliberate
+# choice in this project.
+Checks: >
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  clang-analyzer-*,
+  cppcoreguidelines-init-variables,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  cppcoreguidelines-pro-type-member-init,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-special-member-functions,
+  cppcoreguidelines-virtual-class-destructor,
+  misc-*,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -modernize-use-nodiscard,
+  -modernize-use-designated-initializers,
+  -modernize-use-ranges,
+  performance-*,
+  -performance-enum-size,
+  portability-*,
+  -portability-avoid-pragma-once,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -readability-avoid-nested-conditional-operator,
+  -readability-braces-around-statements,
+  -readability-implicit-bool-conversion,
+  -readability-redundant-member-init,
+  -readability-simplify-boolean-expr,
+  -readability-uppercase-literal-suffix,
+  -readability-use-concise-preprocessor-directives
+
+# Findings are advisory in CI; nothing here should block a build on its own.
+WarningsAsErrors: ''
+
+# Only our own sources, never libusb or the standard library.
+HeaderFilterRegex: '(src|tests)/.*\.h$'
+
+FormatStyle: file
+
+CheckOptions:
+  # The naming scheme the code already uses, made explicit so new code follows
+  # it: types CamelCase, functions and variables camelBack, constants kCamelCase,
+  # private members with a trailing underscore.
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: camelBack
+  - key: readability-identifier-naming.VariableCase
+    value: camelBack
+  - key: readability-identifier-naming.ParameterCase
+    value: camelBack
+  - key: readability-identifier-naming.MemberCase
+    value: camelBack
+  - key: readability-identifier-naming.PrivateMemberCase
+    value: camelBack
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: k
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.GlobalConstantPrefix
+    value: k
+  - key: readability-identifier-naming.StaticConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.StaticConstantPrefix
+    value: k
+  - key: readability-identifier-naming.TypeAliasCase
+    value: CamelCase
+
+  # An EEPROM driver is full of small integer conversions; keep the ones that
+  # matter (signed/unsigned) and drop the noise.
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '1'
+  - key: performance-unnecessary-value-param.AllowedTypes
+    value: 'std::span;std::string_view'
+---

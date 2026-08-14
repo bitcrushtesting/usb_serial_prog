@@ -1,0 +1,180 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# usb_serial_prog - configuration EEPROM programmer for USB serial chips
+# Copyright (C) 2026 Bitcrush Testing
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu / gcc
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+          - name: ubuntu / clang
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: macos / clang
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libusb-1.0-0-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libusb
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSBPROG_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # No USB device is attached to a runner, so this only proves the binary
+      # starts and that the driver tables are consistent.
+      - name: Smoke test
+        run: |
+          ./build/usbprog --version
+          ./build/usbprog drivers
+          ./build/usbprog props --driver ft232r
+          ./build/usbprog props --driver ftx
+
+  coverage:
+    name: unit test coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libusb-1.0-0-dev
+          pip install 'gcovr==8.6'
+
+      - name: Build instrumented
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DUSBPROG_COVERAGE=ON
+          cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # Scope: everything the unit tests can reach. The libusb transport
+      # (core/usb.cpp, ftdi_driver.cpp) needs a real device, and src/cli is
+      # exercised by the smoke test in the build job, so neither is counted.
+      - name: Report
+        run: |
+          mkdir -p coverage
+          gcovr --root . \
+            --filter 'src/core/' --filter 'src/drivers/' \
+            --exclude 'src/core/usb\.(cpp|h)' \
+            --exclude 'src/drivers/ftdi/ftdi_driver\.cpp' \
+            --txt coverage/coverage.txt \
+            --html-details coverage/index.html \
+            --json-summary coverage/summary.json \
+            --print-summary \
+            --fail-under-line 75 \
+            build
+          {
+            echo '### Unit test coverage'
+            echo '```'
+            cat coverage/coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+      # Keeps the README badge honest without depending on an external service.
+      - name: Update the coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          percent=$(python3 -c "import json; print(f\"{json.load(open('coverage/summary.json'))['line_percent']:.1f}\")")
+          colour=$(python3 -c "
+          p = $percent
+          print('brightgreen' if p >= 90 else 'green' if p >= 80 else
+                'yellowgreen' if p >= 70 else 'yellow' if p >= 60 else
+                'orange' if p >= 50 else 'red')")
+          cat > .github/badges/coverage.json <<EOF
+          {
+            "schemaVersion": 1,
+            "label": "coverage",
+            "message": "$percent%",
+            "color": "$colour"
+          }
+          EOF
+          if ! git diff --quiet -- .github/badges/coverage.json; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .github/badges/coverage.json
+            git commit -m "ci: coverage badge at $percent% [skip ci]"
+            git push
+          fi
+
+  lint:
+    name: format, tidy and licence headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libusb-1.0-0-dev
+          # Pinned so a new LLVM release cannot fail the build overnight; bump
+          # deliberately and reformat in the same commit.
+          pip install 'clang-format==22.1.8' 'clang-tidy==22.1.8'
+
+      - name: Check formatting
+        run: find src tests -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run --Werror
+
+      - name: Check licence headers
+        run: |
+          missing=0
+          files=$(find src tests cmake -name '*.cpp' -o -name '*.h' -o -name '*.cmake')
+          for file in $files CMakeLists.txt; do
+            if ! grep -q 'SPDX-License-Identifier: GPL-2.0-only' "$file"; then
+              echo "missing licence header: $file"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Configure (for compile_commands.json)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Run clang-tidy
+        run: clang-tidy -p build --warnings-as-errors='*' $(find src tests -name '*.cpp')
