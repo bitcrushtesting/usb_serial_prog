@@ -134,7 +134,9 @@ struct Attachment {
 Attachment attach(const usb::Context& context, const Registry& registry, const Options& options) {
     Target target = selectTarget(context, registry, options);
     usb::Handle handle = target.device.open();
-    auto programmer = target.driver->attach(std::move(handle), target.info);
+    AttachOptions attachOptions;
+    attachOptions.eepromBytes = options.eepromBytes;
+    auto programmer = target.driver->attach(std::move(handle), target.info, attachOptions);
     for (const std::string& warning : programmer->warnings()) {
         std::cerr << "warning: " << warning << "\n";
     }
@@ -166,6 +168,35 @@ void requireUnderstoodImage(const Programmer& programmer, std::span<const uint8_
                 "layout correctly. Writing now could produce an image the chip rejects.\n"
                 "Use 'usbprog dump' to inspect it, restore a known good image with 'usbprog "
                 "write', or repeat the command with --force if you know what you are doing.");
+}
+
+/// The second half of the blank-identity guard.
+///
+/// Seeding from the descriptor fixes a chip that still runs on its built-in
+/// defaults, but not one already enumerating as ffff:ffff — there the
+/// descriptor reports the bad value too. Committing that would stamp a valid
+/// checksum onto an identity no probe can match, stranding the device behind
+/// --driver for good. It is never what anyone means, so it is refused.
+void requireUsableIdentity(const PropertyMap& values, const Options& options) {
+    static constexpr uint32_t kBlankId = 0xFFFF;
+    for (const char* name : {"vendor_id", "product_id"}) {
+        const auto it = values.find(name);
+        if (it == values.end() || getNumber(values, name) != kBlankId) {
+            continue;
+        }
+        if (options.force) {
+            std::cerr << "warning: writing " << name
+                      << "=0xffff; the device will not be found by probing after this, only "
+                         "with --device and --driver\n";
+            return;
+        }
+        throw Error(std::string(name) +
+                    " is 0xffff, which is what a blank EEPROM reads rather than a real USB ID.\n"
+                    "Writing it makes the device impossible to find without --device and "
+                    "--driver.\n"
+                    "Name the real value (for example vendor_id=0x0403 product_id=0x6011), or "
+                    "repeat with --force if you truly want it.");
+    }
 }
 
 void saveBackup(const Target& target, std::span<const uint8_t> image, const Options& options) {
@@ -344,6 +375,9 @@ int commandWrite(const usb::Context& context, const Registry& registry, const Op
                     "' fails its checksum check; the chip would fall back to its factory "
                     "defaults. Repeat with --force to write it anyway.");
     }
+    // A saved image can carry a blank identity just as easily as a `set` can
+    // produce one, and restoring it strands the device the same way.
+    requireUsableIdentity(programmer.decode(image), options);
 
     if (options.dryRun) {
         std::cout << "Dry run: would write " << image.size() << " bytes from " << options.inputFile
@@ -380,6 +414,15 @@ int commandSet(const usb::Context& context, const Registry& registry, const Opti
     const PropertyMap before = programmer.decode(current);
     PropertyMap wanted = before;
 
+    // Before the user's own settings, so anything they name still wins.
+    const std::vector<std::string> seeded =
+        programmer.seedFromDescriptor(wanted, attachment.target.info);
+    for (const std::string& name : seeded) {
+        std::cerr << "note: " << name
+                  << " read as 0xffff (a blank EEPROM); using the value the device reports over "
+                     "USB instead\n";
+    }
+
     for (const std::string& argument : options.arguments) {
         const auto equals = argument.find('=');
         if (equals == std::string::npos) {
@@ -397,6 +440,8 @@ int commandSet(const usb::Context& context, const Registry& registry, const Opti
         }
         wanted[key] = parse(*spec, value);
     }
+
+    requireUsableIdentity(wanted, options);
 
     std::vector<uint8_t> updated = current;
     programmer.encode(wanted, updated);

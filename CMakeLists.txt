@@ -50,6 +50,7 @@ add_library(usbprog_core STATIC
   src/core/text.cpp
   src/core/usb.cpp
   src/drivers/ftdi/ft232r.cpp
+  src/drivers/ftdi/ft4232h.cpp
   src/drivers/ftdi/ftdi_codec.cpp
   src/drivers/ftdi/ftdi_driver.cpp
   src/drivers/ftdi/ftx.cpp

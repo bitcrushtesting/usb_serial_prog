@@ -19,6 +19,7 @@
 
 #include "core/usb.h"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,9 @@ struct Options {
     std::string inputFile;
     std::string outputFile;
     std::string backupFile;
+
+    /// Size of an external EEPROM in bytes; 0 measures it instead.
+    std::size_t eepromBytes = 0;
 
     bool assumeYes = false;
     bool verbose = false;

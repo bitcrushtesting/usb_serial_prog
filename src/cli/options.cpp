@@ -77,6 +77,9 @@ Device selection (all given conditions must match):
       --address N       match by USB device address
       --index N         pick the N-th match, counting from 0
       --driver ID       force a driver instead of probing (see 'usbprog drivers')
+      --eeprom-size N   size of an external EEPROM: 128 (93C46) or 256 (93C56,
+                        93C66). Only needed when the chip is blank, where the
+                        size cannot be measured
 
 Options:
   -o, --output FILE     destination file for 'read'
@@ -160,6 +163,13 @@ Options parse(int argc, char** argv) {
                 options.filter.index = text::parseUnsigned(value(), 4095);
             } else if (name == "--driver") {
                 options.driverId = value();
+            } else if (name == "--eeprom-size") {
+                const uint32_t bytes = text::parseUnsigned(value(), 256);
+                if (bytes != 128 && bytes != 256) {
+                    throw Error("--eeprom-size takes 128 (93C46) or 256 (93C56, 93C66), got " +
+                                std::to_string(bytes));
+                }
+                options.eepromBytes = bytes;
             } else if (name == "-o" || name == "--output") {
                 options.outputFile = value();
             } else if (name == "-i" || name == "--input") {
