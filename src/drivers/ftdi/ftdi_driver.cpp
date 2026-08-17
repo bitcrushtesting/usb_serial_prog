@@ -26,6 +26,7 @@
 #include "drivers/ftdi/ftx.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -38,9 +39,22 @@ namespace usbprog::ftdi {
 namespace {
 
 /// Vendor requests understood by the FTDI USB interface.
+constexpr uint8_t kReset = 0x00;
+constexpr uint8_t kPollModemStatus = 0x05;
+constexpr uint8_t kSetLatencyTimer = 0x09;
 constexpr uint8_t kReadEeprom = 0x90;
 constexpr uint8_t kWriteEeprom = 0x91;
 constexpr uint8_t kEraseEeprom = 0x92;
+
+constexpr uint16_t kResetSio = 0; ///< wValue for a full reset
+
+/// wIndex for the port-level requests. FTDI numbers channels from one, so the
+/// first channel is 1 even on single channel parts.
+constexpr uint16_t kPortIndex = 1;
+
+/// Latency FTDI's MProg sets before programming. The value matters less than
+/// issuing the request at all; it is what the traced sequence uses.
+constexpr uint16_t kProgrammingLatency = 0x77;
 
 constexpr int kInterfaceNumber = 0;
 
@@ -90,9 +104,11 @@ std::size_t detectEepromBytes(std::span<const uint8_t> window) {
 class FtdiProgrammer final : public usbprog::Programmer {
 public:
     FtdiProgrammer(usb::Handle handle, std::string chipName, std::unique_ptr<Codec> codec,
-                   std::vector<std::string> warnings, std::size_t writableBytes)
+                   std::vector<std::string> warnings, std::size_t writableBytes,
+                   bool eraseSupported)
         : handle_(std::move(handle)), chipName_(std::move(chipName)), codec_(std::move(codec)),
-          warnings_(std::move(warnings)), writableBytes_(writableBytes) {}
+          warnings_(std::move(warnings)), writableBytes_(writableBytes),
+          eraseSupported_(eraseSupported) {}
 
     std::string chipName() const override { return chipName_; }
 
@@ -123,6 +139,7 @@ public:
                         " byte EEPROM fitted to this chip: the chip wraps addresses, so the upper "
                         "half of the image would overwrite the header.");
         }
+        prepareForWrite();
         for (std::size_t word = 0; word < image.size() / 2; ++word) {
             const auto value =
                 static_cast<uint16_t>(image[word * 2] | (image[(word * 2) + 1] << 8));
@@ -131,7 +148,20 @@ public:
         verifyAgainst(image);
     }
 
-    void eraseEeprom() override { handle_.controlOut(kEraseEeprom, 0, 0); }
+    void eraseEeprom() override {
+        // FTDI's MProg manual states the erase request is not supported on the
+        // FT232R/FT245R, and the FT-X stores its settings in on-die MTP rather
+        // than an erasable EEPROM. Sending it anyway does nothing useful and
+        // invites the belief that the chip has been reset when it has not.
+        if (!eraseSupported_) {
+            throw Error(chipName_ +
+                        " does not support the erase request; its configuration memory is not "
+                        "erasable that way.\n"
+                        "To go back to a known state, write an image you saved earlier with "
+                        "'usbprog write -i BACKUP'.");
+        }
+        handle_.controlOut(kEraseEeprom, 0, 0);
+    }
 
     const std::vector<PropertySpec>& properties() const override { return codec_->properties(); }
 
@@ -155,6 +185,21 @@ public:
     std::vector<std::string> warnings() const override { return warnings_; }
 
 private:
+    /// Put the port into the state FTDI's own programming tool leaves it in
+    /// before it touches the EEPROM: reset the SIO block, read the modem
+    /// status, then set the programming latency.
+    ///
+    /// This is not ceremony. Without it an FT232R accepts the first word or
+    /// two and then silently drops every write that follows, leaving a mostly
+    /// erased EEPROM behind. The sequence was traced from MProg and is what
+    /// libftdi's ftdi_write_eeprom() does for the same reason.
+    void prepareForWrite() {
+        handle_.controlOut(kReset, kResetSio, kPortIndex);
+        std::array<uint8_t, 2> modemStatus{};
+        handle_.controlIn(kPollModemStatus, 0, kPortIndex, modemStatus);
+        handle_.controlOut(kSetLatencyTimer, kProgrammingLatency, kPortIndex);
+    }
+
     void verifyAgainst(std::span<const uint8_t> expected) {
         const std::vector<uint8_t> actual = readEeprom();
         for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -162,8 +207,12 @@ private:
                 throw Error("write verification failed at offset 0x" +
                             text::hex16(static_cast<uint16_t>(i)) + ": wrote 0x" +
                             text::hex8(expected[i]) + ", read back 0x" + text::hex8(actual[i]) +
-                            ". The EEPROM contents are now inconsistent; restore a backup or run "
-                            "'usbprog erase' to fall back to the factory defaults");
+                            ".\nThe EEPROM contents are now inconsistent. Restore the backup this "
+                            "command saved with 'usbprog write -i BACKUP'" +
+                            (eraseSupported_ ? ", or run 'usbprog erase' to fall back to the "
+                                               "factory defaults"
+                                             : "") +
+                            ".");
             }
         }
     }
@@ -175,6 +224,8 @@ private:
     /// How many bytes it is safe to write. 0 means the size is unknown, which
     /// bars writing altogether rather than defaulting to the nominal size.
     std::size_t writableBytes_ = 0;
+    /// Whether the chip honours the erase request at all.
+    bool eraseSupported_ = false;
 };
 
 /// One driver instance per chip family. Families differ only in the bcdDevice
@@ -187,10 +238,12 @@ public:
     using CodecFactory = std::function<std::unique_ptr<Codec>(std::size_t)>;
 
     FtdiDriver(std::string id, std::string chipName, std::string description, uint16_t bcdDevice,
-               std::size_t nominalBytes, bool externalEeprom, CodecFactory factory)
+               std::size_t nominalBytes, bool externalEeprom, bool eraseSupported,
+               CodecFactory factory)
         : id_(std::move(id)), chipName_(std::move(chipName)), description_(std::move(description)),
           bcdDevice_(bcdDevice), nominalBytes_(nominalBytes), externalEeprom_(externalEeprom),
-          factory_(std::move(factory)), prototype_(factory_(nominalBytes)) {}
+          eraseSupported_(eraseSupported), factory_(std::move(factory)),
+          prototype_(factory_(nominalBytes)) {}
 
     std::string id() const override { return id_; }
     std::string description() const override { return description_; }
@@ -221,7 +274,8 @@ public:
 
         const EepromSize size = resolveEepromSize(handle, options, warnings);
         return std::make_unique<FtdiProgrammer>(std::move(handle), chipName_, factory_(size.layout),
-                                                std::move(warnings), size.physical);
+                                                std::move(warnings), size.physical,
+                                                eraseSupported_);
     }
 
     const std::vector<PropertySpec>& properties() const override {
@@ -279,6 +333,7 @@ private:
     uint16_t bcdDevice_;
     std::size_t nominalBytes_;
     bool externalEeprom_;
+    bool eraseSupported_;
     CodecFactory factory_;
     std::unique_ptr<Codec> prototype_;
 };
@@ -288,16 +343,16 @@ private:
 void registerDrivers(Registry& registry) {
     registry.add(std::make_unique<FtdiDriver>(
         "ft232r", "FT232R", "FTDI FT232R / FT245R, 128 byte internal EEPROM", 0x0600, 128, false,
-        [](std::size_t) { return std::make_unique<Ft232rCodec>(); }));
+        false, [](std::size_t) { return std::make_unique<Ft232rCodec>(); }));
 
     registry.add(std::make_unique<FtdiDriver>(
         "ftx", "FT-X", "FTDI FT-X series (FT230X/FT231X/FT234XD), 256 byte EEPROM [experimental]",
-        0x1000, 256, false, [](std::size_t) { return std::make_unique<FtxCodec>(); }));
+        0x1000, 256, false, false, [](std::size_t) { return std::make_unique<FtxCodec>(); }));
 
     registry.add(std::make_unique<FtdiDriver>(
         "ft4232h", "FT4232H",
         "FTDI FT4232H quad UART, external 93C46/93C56/93C66 EEPROM [experimental]", 0x0800, 256,
-        true, [](std::size_t bytes) { return std::make_unique<Ft4232hCodec>(bytes); }));
+        true, true, [](std::size_t bytes) { return std::make_unique<Ft4232hCodec>(bytes); }));
 }
 
 } // namespace usbprog::ftdi
