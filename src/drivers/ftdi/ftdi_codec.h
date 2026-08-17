@@ -28,7 +28,12 @@
 namespace usbprog::ftdi {
 
 /// EEPROM byte offsets shared by all FTDI chips that use the "new" layout
-/// (FT232R and the FT-X family both do).
+/// (FT232R, the FT-X family and the H series all do).
+///
+/// One exception is worth knowing about: 0x0B holds the per-signal inversion
+/// bits on the FT232R and FT-X, but the FT4232H has no inverters and uses the
+/// same byte for its per-channel RS485 enables. Layout::signalInversion tells
+/// the base codec which of the two a chip means.
 namespace addr {
 constexpr uint16_t kVendorId = 0x02;         ///< 2 bytes, little endian
 constexpr uint16_t kProductId = 0x04;        ///< 2 bytes, little endian
@@ -91,6 +96,11 @@ public:
         uint16_t stringAreaEnd = 0x7E;   ///< one past the last usable byte
         uint16_t checksumWord = 0x3F;    ///< word index holding the checksum
         std::vector<WordRange> checksumWords{{0x00, 0x3F}};
+
+        /// Whether the chip has the invert_* signal inverters at addr::kInvert.
+        /// Chips that set this to false own that byte themselves and must
+        /// handle it in decodeChip()/encodeChip().
+        bool signalInversion = true;
     };
 
     explicit Codec(Layout layout);
@@ -116,6 +126,19 @@ public:
 
     /// How many UTF-16 code units all three strings may use together.
     std::size_t stringBudget() const;
+
+    /// What an erased EEPROM decodes its USB identity as. Not an assignable
+    /// ID: FTDI never ships it, and a device carrying it cannot be probed for.
+    static constexpr uint32_t kBlankId = 0xFFFF;
+
+    /// Replace a blank vendor_id/product_id with what the device reports over
+    /// USB, so a `set` that names only the strings on a fresh chip cannot
+    /// commit 0xffff as the identity. Values that already hold something real
+    /// are left alone, as is a reported ID that is itself blank — that means
+    /// the device has already been stranded and there is nothing to copy.
+    /// Returns the properties actually filled in.
+    std::vector<std::string> seedIdentity(PropertyMap& values, uint16_t reportedVendorId,
+                                          uint16_t reportedProductId) const;
 
 protected:
     void addProperty(PropertySpec spec);

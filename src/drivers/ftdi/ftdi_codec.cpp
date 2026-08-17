@@ -144,10 +144,38 @@ void Codec::addCommonProperties() {
 
     addProperty(boolProperty("suspend_pull_downs", "pull down the I/O pins while suspended"));
 
-    for (const auto& bit : kInvertBits) {
-        addProperty(
-            boolProperty(bit.name, std::string("invert the ") + bit.signalHelp + " signal"));
+    if (layout_.signalInversion) {
+        for (const auto& bit : kInvertBits) {
+            addProperty(
+                boolProperty(bit.name, std::string("invert the ") + bit.signalHelp + " signal"));
+        }
     }
+}
+
+std::vector<std::string> Codec::seedIdentity(PropertyMap& values, uint16_t reportedVendorId,
+                                             uint16_t reportedProductId) const {
+    struct Seed {
+        const char* name;
+        uint16_t reported;
+    };
+    const Seed seeds[] = {
+        {"vendor_id", reportedVendorId},
+        {"product_id", reportedProductId},
+    };
+
+    std::vector<std::string> filled;
+    for (const Seed& seed : seeds) {
+        const auto it = values.find(seed.name);
+        if (it == values.end() || getNumber(values, seed.name) != kBlankId) {
+            continue; // holds a real value already
+        }
+        if (seed.reported == kBlankId || seed.reported == 0) {
+            continue; // nothing usable to copy from
+        }
+        it->second = static_cast<uint32_t>(seed.reported);
+        filled.emplace_back(seed.name);
+    }
+    return filled;
 }
 
 void Codec::requireSize(std::size_t size) const {
@@ -237,9 +265,11 @@ PropertyMap Codec::decode(std::span<const uint8_t> image) const {
     values["use_serial"] = (chipByte & chip::kUseSerial) != 0;
     values["suspend_pull_downs"] = (chipByte & chip::kSuspendPullDowns) != 0;
 
-    const uint8_t invertByte = image[addr::kInvert];
-    for (const auto& bit : kInvertBits) {
-        values[bit.name] = (invertByte & bit.mask) != 0;
+    if (layout_.signalInversion) {
+        const uint8_t invertByte = image[addr::kInvert];
+        for (const auto& bit : kInvertBits) {
+            values[bit.name] = (invertByte & bit.mask) != 0;
+        }
     }
 
     decodeChip(image, values);
@@ -266,11 +296,13 @@ void Codec::encode(const PropertyMap& values, std::vector<uint8_t>& image) const
     setBit(chipByte, chip::kSuspendPullDowns, getBool(values, "suspend_pull_downs"));
     image[addr::kChipConfig] = chipByte;
 
-    uint8_t invertByte = 0;
-    for (const auto& bit : kInvertBits) {
-        setBit(invertByte, bit.mask, getBool(values, bit.name));
+    if (layout_.signalInversion) {
+        uint8_t invertByte = 0;
+        for (const auto& bit : kInvertBits) {
+            setBit(invertByte, bit.mask, getBool(values, bit.name));
+        }
+        image[addr::kInvert] = invertByte;
     }
-    image[addr::kInvert] = invertByte;
 
     writeStrings(image, getString(values, "manufacturer"), getString(values, "product"),
                  getString(values, "serial_number"));

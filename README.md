@@ -16,15 +16,88 @@ to `libusb-1.0` directly and needs neither `libftdi` nor FTDI's proprietary
 
 ## Supported chips
 
-| Driver   | Chips | EEPROM | Status |
-| -------- | ----- | ------ | ------ |
-| `ft232r` | FT232R, FT245R | 128 bytes, internal | tested against hardware |
-| `ftx`    | FT230X, FT231X, FT234XD | 256 bytes | experimental, see below |
+| Driver    | Chips | EEPROM | Status |
+| --------- | ----- | ------ | ------ |
+| `ft232r`  | FT232R, FT245R | 128 bytes, internal | tested against hardware |
+| `ftx`     | FT230X, FT231X, FT234XD | 256 bytes | experimental, see below |
+| `ft4232h` | FT4232H | 256 bytes, external | experimental, see below |
 
-The FT-X layout follows the same public description as the FT232R one, but has
-had far less exposure to real silicon. `usbprog` will not write to a chip whose
-current EEPROM contents fail the checksum this tool computes, which is a direct
-test of whether it understands the layout — see [Safety](#safety).
+The FT-X and FT4232H layouts follow the same public description as the FT232R
+one, but have had far less exposure to real silicon. `usbprog` will not write to
+a chip whose current EEPROM contents fail the checksum this tool computes, which
+is a direct test of whether it understands the layout — see [Safety](#safety).
+
+The FT4232H has four independent UARTs and, unlike the other two families, no
+CBUS pins and no signal inverters. Its settings therefore come in per-channel
+sets suffixed `_a` to `_d` — `vcp_*`, `rs485_*`, `drive_*`, `schmitt_*` and
+`slow_slew_*`. Run `usbprog props` against a connected chip for the full list.
+
+### FT4232H EEPROM size
+
+The FT4232H's EEPROM is external rather than on-die, and which part is fitted
+changes the layout. The chip wraps EEPROM word addresses modulo the size of the
+part, so on a 93C46 the string area at 0x9A folds down onto 0x1A:
+
+| Part            | Size      | Strings at | Checksum word |
+| --------------- | --------- | ---------- | ------------- |
+| 93C46           | 128 bytes | 0x1A       | 0x3F          |
+| 93C56, 93C66    | 256 bytes | 0x9A       | 0x7F          |
+
+This matters because the wrapping is not harmless: writing a 256 byte image to
+a 93C46 folds the upper half back onto the header and destroys it. `usbprog`
+therefore measures the part before writing — a smaller EEPROM read through a
+larger window shows up as its contents mirrored — and refuses to write an image
+that would wrap.
+
+A blank EEPROM cannot be measured, because it reads the same at every size. In
+that one case you have to say which part is fitted:
+
+```sh
+usbprog set --eeprom-size 128 vendor_id=0x0403 product_id=0x6011 product="..."
+```
+
+Getting it wrong is safe as long as the chip is blank: a mismatch between
+`--eeprom-size` and a later measurement is reported rather than written.
+
+### Blank chips and the USB identity
+
+`set` is a read-modify-write: it decodes what is on the chip, applies the
+settings you name, and writes the result back. On a chip with a blank EEPROM
+every field you do *not* name decodes as `0xff`, so naming only the strings
+would commit `vendor_id`/`product_id` as `0xffff` — together with a freshly
+computed, and therefore *valid*, checksum. The chip then believes it and
+enumerates as `ffff:ffff`, where no probe can find it.
+
+This mostly matters for external EEPROMs, which arrive blank. The FT232R never
+showed it, because its internal EEPROM ships pre-programmed.
+
+Two things prevent it. A blank identity is seeded from what the device reports
+over USB, which is correct because a chip with a blank EEPROM runs on its
+built-in defaults:
+
+```
+$ usbprog set product="MotionAI"
+note: vendor_id read as 0xffff (a blank EEPROM); using the value the device
+      reports over USB instead
+```
+
+Anything you name yourself is applied afterwards and wins, so a deliberately
+reprogrammed vendor ID is never undone. And once a device has already been
+stranded the descriptor repeats the bad value, so there is nothing to seed
+from; writing `0xffff` is refused outright instead:
+
+```
+$ usbprog write -i stranded.bin
+usbprog: vendor_id is 0xffff, which is what a blank EEPROM reads rather than a
+real USB ID. [...] repeat with --force if you truly want it.
+```
+
+To recover a device already enumerating as `ffff:ffff`, reach it explicitly and
+name the right IDs:
+
+```sh
+usbprog set --device ffff:ffff --driver ft4232h vendor_id=0x0403 product_id=0x6011
+```
 
 ## Installing a release
 

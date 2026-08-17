@@ -23,6 +23,7 @@
 #include "core/registry.h"
 #include "core/text.h"
 #include "drivers/ftdi/ft232r.h"
+#include "drivers/ftdi/ft4232h.h"
 #include "drivers/ftdi/ftdi_codec.h"
 #include "drivers/ftdi/ftx.h"
 
@@ -236,6 +237,148 @@ void testFtxLayout() {
     CHECK(codec.computeChecksum(image) != before);
 }
 
+void testFt4232hLayout() {
+    const ftdi::Ft4232hCodec codec{256};
+    CHECK_EQUAL(codec.layout().size, std::size_t{256});
+
+    std::vector<uint8_t> image = blankImage(codec);
+    PropertyMap values = codec.decode(image);
+    values["product"] = std::string("Quad RS232-HS");
+    codec.encode(values, image);
+
+    CHECK(codec.verifyChecksum(image));
+    // Strings start at 0x9A on the H series. The manufacturer string is empty
+    // here, so it takes only its two byte header and the product follows.
+    CHECK_EQUAL(int(image[0x0E]), 0x9A | 0x80);
+    CHECK_EQUAL(int(image[0x10]), 0x9C | 0x80);
+    CHECK_EQUAL(getString(codec.decode(image), "product"), std::string("Quad RS232-HS"));
+
+    // Unlike the FT-X, the checksum covers one uninterrupted run of words, so
+    // no byte below the checksum word may be ignored.
+    const uint16_t before = codec.computeChecksum(image);
+    image[0x30] ^= 0xFF;
+    CHECK(codec.computeChecksum(image) != before);
+}
+
+/// An FT4232H with a 93C46 fitted. The chip wraps word addresses modulo the
+/// part, so the string area at 0x9A folds onto 0x1A and the whole image has to
+/// fit in 128 bytes. Writing a 256 byte image to such a board wraps its upper
+/// half onto the header and destroys it, which is what this layout avoids.
+void testFt4232hOn93c46() {
+    const ftdi::Ft4232hCodec codec{128};
+    CHECK_EQUAL(codec.layout().size, std::size_t{128});
+    CHECK_EQUAL(codec.layout().checksumWord, 0x3F);
+
+    std::vector<uint8_t> image = blankImage(codec);
+    PropertyMap values = codec.decode(image);
+    values["product"] = std::string("MotionAI");
+    values["serial_number"] = std::string("MOTION-913");
+    values["vcp_a"] = true;
+    codec.encode(values, image);
+
+    CHECK(codec.verifyChecksum(image));
+
+    // The offset byte still records 0x9A, exactly as on a 256 byte part; only
+    // the data moves, because readers mask the offset with the EEPROM size.
+    CHECK_EQUAL(int(image[0x0E]), 0x9A);
+    CHECK_EQUAL(int(image[0x1A]), 0x02);        // empty manufacturer, header only
+    CHECK_EQUAL(int(image[0x1B]), 0x03);        // USB string descriptor type
+    CHECK_EQUAL(int(image[0x1C]), 2 + (8 * 2)); // "MotionAI"
+
+    const PropertyMap back = codec.decode(image);
+    CHECK_EQUAL(getString(back, "product"), std::string("MotionAI"));
+    CHECK_EQUAL(getString(back, "serial_number"), std::string("MOTION-913"));
+    CHECK(getBool(back, "vcp_a"));
+
+    // The strings must not reach the header, or they would land on the very
+    // bytes that say where they are.
+    CHECK(codec.layout().stringAreaBegin > 0x19);
+
+    // A size the chip cannot have is refused rather than silently rounded.
+    bool threw = false;
+    try {
+        const ftdi::Ft4232hCodec bad{512};
+        (void)bad;
+    } catch (const Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+/// The FT4232H has no inverters, and 0x0B means something else entirely on it.
+void testFt4232hHasNoInverters() {
+    const ftdi::Ft4232hCodec codec{256};
+    for (const PropertySpec& spec : codec.properties()) {
+        CHECK(spec.name.rfind("invert_", 0) != 0);
+    }
+    // The other families keep theirs.
+    const ftdi::Ft232rCodec ft232r;
+    bool found = false;
+    for (const PropertySpec& spec : ft232r.properties()) {
+        found = found || spec.name == "invert_txd";
+    }
+    CHECK(found);
+}
+
+void testFt4232hPerChannelBits() {
+    const ftdi::Ft4232hCodec codec{256};
+    std::vector<uint8_t> image = blankImage(codec);
+    PropertyMap values = codec.decode(image);
+
+    // A blank image reads as the lowest drive strength, everything else off.
+    CHECK_EQUAL(getNumber(values, "drive_a"), 4u);
+    CHECK(!getBool(values, "vcp_a"));
+    CHECK(!getBool(values, "rs485_d"));
+
+    values["vcp_a"] = true; // low nibble of 0x00
+    values["vcp_c"] = true; // high nibble of the same byte
+    values["vcp_b"] = true; // low nibble of 0x01
+    values["rs485_a"] = true;
+    values["rs485_d"] = true;
+    values["drive_a"] = uint32_t{16};
+    values["drive_b"] = uint32_t{8};
+    values["slow_slew_c"] = true;
+    values["schmitt_d"] = true;
+    codec.encode(values, image);
+
+    CHECK_EQUAL(int(image[0x00]), 0x88); // vcp_a low, vcp_c high
+    CHECK_EQUAL(int(image[0x01]), 0x08); // vcp_b low, vcp_d clear
+    CHECK_EQUAL(int(image[0x0B]), 0x90); // rs485_a is 0x10, rs485_d is 0x80
+    CHECK_EQUAL(int(image[0x0C]), 0x13); // channel A 16 mA, channel B 8 mA
+    CHECK_EQUAL(int(image[0x0D]), 0x84); // channel C slow slew, channel D Schmitt
+
+    const PropertyMap back = codec.decode(image);
+    CHECK(getBool(back, "vcp_a"));
+    CHECK(getBool(back, "vcp_b"));
+    CHECK(getBool(back, "vcp_c"));
+    CHECK(!getBool(back, "vcp_d"));
+    CHECK(getBool(back, "rs485_a"));
+    CHECK(!getBool(back, "rs485_b"));
+    CHECK(getBool(back, "rs485_d"));
+    CHECK_EQUAL(getNumber(back, "drive_a"), 16u);
+    CHECK_EQUAL(getNumber(back, "drive_b"), 8u);
+    CHECK_EQUAL(getNumber(back, "drive_c"), 4u);
+    CHECK(getBool(back, "slow_slew_c"));
+    CHECK(!getBool(back, "slow_slew_d"));
+    CHECK(getBool(back, "schmitt_d"));
+}
+
+/// The RS485 byte shares its address with the FT232R inverter byte, so a stray
+/// write from the common code would land on it. Guard that explicitly.
+void testFt4232hKeepsUnmodelledRs485Bits() {
+    const ftdi::Ft4232hCodec codec{256};
+    std::vector<uint8_t> image = blankImage(codec);
+    image[0x0B] = 0x0F; // the reserved low nibble
+    image[0x18] = 0x66; // the EEPROM type marker, not modelled either
+
+    PropertyMap values = codec.decode(image);
+    values["rs485_b"] = true;
+    codec.encode(values, image);
+
+    CHECK_EQUAL(int(image[0x0B]), 0x2F); // rs485_b set, low nibble intact
+    CHECK_EQUAL(int(image[0x18]), 0x66);
+}
+
 /// A factory image read from a real FT232R with 'usbprog read'. It is the only
 /// reference here that did not come out of this code, so it is what proves the
 /// checksum algorithm and the layout right rather than merely self-consistent.
@@ -328,6 +471,57 @@ void testChangingOneSettingLeavesTheRestAlone() {
     }
 }
 
+/// A blank EEPROM decodes its identity as 0xffff. Because `set` is a
+/// read-modify-write, naming only the strings on a fresh chip would otherwise
+/// commit that 0xffff with a valid checksum and strand the device as
+/// ffff:ffff, findable only with --driver. The programmer fills the blanks
+/// from what the device reports over USB instead.
+void testBlankIdentityIsSeededFromTheDescriptor() {
+    const ftdi::Ft4232hCodec codec{128};
+    const std::vector<uint8_t> blank(codec.layout().size, 0xFF);
+
+    // A blank EEPROM decodes to the placeholder, which is what makes a partial
+    // `set` dangerous in the first place.
+    PropertyMap values = codec.decode(blank);
+    CHECK_EQUAL(getNumber(values, "vendor_id"), 0xFFFFu);
+    CHECK_EQUAL(getNumber(values, "product_id"), 0xFFFFu);
+
+    // A chip running on its built-in defaults still reports the real IDs.
+    const std::vector<std::string> filled = codec.seedIdentity(values, 0x0403, 0x6011);
+    CHECK_EQUAL(filled.size(), std::size_t{2});
+    CHECK_EQUAL(getNumber(values, "vendor_id"), 0x0403u);
+    CHECK_EQUAL(getNumber(values, "product_id"), 0x6011u);
+
+    // Encoding the seeded map yields an image that probes correctly, which is
+    // the whole point: the same map without seeding would enumerate ffff:ffff.
+    std::vector<uint8_t> image = blank;
+    codec.encode(values, image);
+    CHECK(codec.verifyChecksum(image));
+    CHECK_EQUAL(getNumber(codec.decode(image), "vendor_id"), 0x0403u);
+
+    // Values that already hold something real are never overwritten, so
+    // seeding cannot undo a deliberately reprogrammed vendor ID.
+    PropertyMap custom = codec.decode(image);
+    custom["vendor_id"] = uint32_t{0x1234};
+    CHECK(codec.seedIdentity(custom, 0x0403, 0x6011).empty());
+    CHECK_EQUAL(getNumber(custom, "vendor_id"), 0x1234u);
+
+    // Once a device has already been stranded as ffff:ffff the descriptor
+    // repeats the bad value, so there is nothing to copy and the write guard
+    // has to be the one that catches it.
+    PropertyMap stranded = codec.decode(blank);
+    CHECK(codec.seedIdentity(stranded, 0xFFFF, 0xFFFF).empty());
+    CHECK_EQUAL(getNumber(stranded, "vendor_id"), 0xFFFFu);
+
+    // Seeding is per property: a blank product_id is filled even when the
+    // vendor_id is already good.
+    PropertyMap half = codec.decode(blank);
+    half["vendor_id"] = uint32_t{0x0403};
+    const std::vector<std::string> one = codec.seedIdentity(half, 0x0403, 0x6011);
+    CHECK_EQUAL(one.size(), std::size_t{1});
+    CHECK_EQUAL(one.front(), std::string("product_id"));
+}
+
 /// The probe logic decides which driver touches which chip, so it is worth a
 /// test of its own; DeviceInfo is a plain struct, no hardware needed.
 void testDriverRegistry() {
@@ -363,7 +557,16 @@ void testDriverRegistry() {
     CHECK(registry.probe(info) == nullptr);
 
     info.vendorId = 0x0403;
+    info.bcdDevice = 0x0800;
+    driver = registry.probe(info);
+    CHECK(driver != nullptr);
+    if (driver != nullptr) {
+        CHECK_EQUAL(driver->id(), std::string("ft4232h"));
+    }
+
     info.bcdDevice = 0x0900; // FT232H, no driver for it yet
+    CHECK(registry.probe(info) == nullptr);
+    info.bcdDevice = 0x0700; // FT2232H, same
     CHECK(registry.probe(info) == nullptr);
 }
 
@@ -434,10 +637,16 @@ int main() {
         testUnmodelledBytesSurvive();
         testFt232rCbusPacking();
         testFtxLayout();
+        testFt4232hLayout();
+        testFt4232hOn93c46();
+        testFt4232hHasNoInverters();
+        testFt4232hPerChannelBits();
+        testFt4232hKeepsUnmodelledRs485Bits();
         testFactoryImageChecksum();
         testFactoryImageDecodesToTheDatasheetDefaults();
         testEncodingAFactoryImageChangesNothing();
         testChangingOneSettingLeavesTheRestAlone();
+        testBlankIdentityIsSeededFromTheDescriptor();
         testDriverRegistry();
         testPropertyParsing();
         testTextHelpers();

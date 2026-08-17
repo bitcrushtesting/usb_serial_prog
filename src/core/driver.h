@@ -79,11 +79,39 @@ public:
     /// layout well enough to modify it.
     virtual bool verifyChecksum(std::span<const uint8_t> image) const = 0;
 
+    /// Fill in properties that decoded as the blank-EEPROM placeholder with
+    /// what the device actually reports over USB.
+    ///
+    /// A blank or damaged EEPROM decodes its identity as 0xffff. Because `set`
+    /// is a read-modify-write, naming only the strings on such a chip commits
+    /// that 0xffff along with a freshly computed — and therefore valid —
+    /// checksum, and the chip enumerates as ffff:ffff, where no probe can find
+    /// it. Seeding from the descriptor closes that, since a chip running on
+    /// its built-in defaults still reports the right IDs.
+    ///
+    /// Only blank values are touched; anything the user names is applied after
+    /// this and wins. Returns the properties filled in, so the CLI can say so.
+    virtual std::vector<std::string> seedFromDescriptor(PropertyMap& values,
+                                                        const usb::DeviceInfo& info) const {
+        (void)values;
+        (void)info;
+        return {};
+    }
+
     /// Non-fatal problems noticed while attaching, e.g. a kernel driver we
     /// could not detach. The CLI shows these to the user.
     virtual std::vector<std::string> warnings() const { return {}; }
 
     const PropertySpec* findProperty(std::string_view name) const;
+};
+
+/// Anything the CLI knows that a driver cannot work out for itself.
+struct AttachOptions {
+    /// Size of an external configuration EEPROM in bytes, 0 to measure it.
+    /// Only needed when measuring is impossible, which is the case for a blank
+    /// EEPROM: chips that wrap addresses read the same at every size when
+    /// empty, and writing the wrong size destroys the image.
+    std::size_t eepromBytes = 0;
 };
 
 /// Recognises a chip family and creates Programmers for it.
@@ -105,8 +133,8 @@ public:
     /// True when this driver can talk to the device.
     virtual bool probe(const usb::DeviceInfo& info) const = 0;
 
-    virtual std::unique_ptr<Programmer> attach(usb::Handle handle,
-                                               const usb::DeviceInfo& info) const = 0;
+    virtual std::unique_ptr<Programmer> attach(usb::Handle handle, const usb::DeviceInfo& info,
+                                               const AttachOptions& options) const = 0;
 
     /// Property schema without a device attached, so `usbprog props --driver X`
     /// works with nothing plugged in.
