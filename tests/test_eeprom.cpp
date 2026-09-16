@@ -22,6 +22,8 @@
 #include "core/property.h"
 #include "core/registry.h"
 #include "core/text.h"
+#include "drivers/ch34x/ch340_config.h"
+#include "drivers/ch34x/ch34x_driver.h"
 #include "drivers/ftdi/ft232r.h"
 #include "drivers/ftdi/ft4232h.h"
 #include "drivers/ftdi/ftdi_codec.h"
@@ -524,6 +526,248 @@ void testBlankIdentityIsSeededFromTheDescriptor() {
 
 /// The probe logic decides which driver touches which chip, so it is worth a
 /// test of its own; DeviceInfo is a plain struct, no hardware needed.
+// ---------------------------------------------------------------------------
+// CH340B. The layout comes from the WCH datasheet "CH340 Datasheet (I)"
+// version 3B, section 5.2, and these tests pin it to those addresses.
+// ---------------------------------------------------------------------------
+
+/// A chip as WCH ships it: the area is there but the signature says the chip
+/// is not reading it.
+std::vector<uint8_t> factoryCh340Area() {
+    // NOLINTNEXTLINE(modernize-return-braced-init-list)
+    return std::vector<uint8_t>(ch34x::config::kBytes, 0x00);
+}
+
+void testCh340InactiveAreaDecodesToTheVendorDefaults() {
+    const ch34x::Ch340Config config;
+    const std::vector<uint8_t> image = factoryCh340Area();
+    const PropertyMap values = config.decode(image);
+
+    // The bytes are all zero, but the chip is not reading them, so what it
+    // reports is the datasheet default rather than 0000:0000.
+    CHECK(!getBool(values, "config_active"));
+    CHECK_EQUAL(getNumber(values, "vendor_id"), 0x1A86u);
+    CHECK_EQUAL(getNumber(values, "product_id"), 0x7523u);
+    CHECK_EQUAL(getNumber(values, "max_power"), 98u); // 0x31 units of 2 mA
+    CHECK(!getBool(values, "use_serial"));            // CFG default 0xfe has bit 5 set
+    CHECK(!getBool(values, "write_protected"));
+    CHECK_EQUAL(getString(values, "serial_number"), std::string());
+    CHECK_EQUAL(getString(values, "product"), std::string());
+}
+
+void testCh340EncodeActivatesTheArea() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    PropertyMap values = config.decode(image);
+    config.encode(values, image);
+
+    // Settings the chip is not reading are not settings, so an encode always
+    // stamps the signature and the serial mode.
+    CHECK_EQUAL(int(image[0x00]), 0x58);
+    CHECK_EQUAL(int(image[0x01]), 0x23);
+    CHECK(ch34x::Ch340Config::isActive(image));
+
+    // The bits nobody named come from the datasheet default, not from the
+    // zeroed bytes that were never in use.
+    CHECK_EQUAL(int(image[0x02] & 0x20), 0x20); // serial number disabled
+    CHECK_EQUAL(int(image[0x0A]), 0x31);        // 98 mA
+
+    const PropertyMap back = config.decode(image);
+    CHECK(getBool(back, "config_active"));
+    CHECK_EQUAL(getNumber(back, "vendor_id"), 0x1A86u);
+    CHECK_EQUAL(getNumber(back, "max_power"), 98u);
+}
+
+void testCh340IdentityAndPowerLayout() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    PropertyMap values = config.decode(image);
+    values["vendor_id"] = uint32_t{0x1234};
+    values["product_id"] = uint32_t{0xABCD};
+    values["max_power"] = uint32_t{200};
+    config.encode(values, image);
+
+    CHECK_EQUAL(int(image[0x04]), 0x34); // little endian, high byte behind
+    CHECK_EQUAL(int(image[0x05]), 0x12);
+    CHECK_EQUAL(int(image[0x06]), 0xCD);
+    CHECK_EQUAL(int(image[0x07]), 0xAB);
+    CHECK_EQUAL(int(image[0x0A]), 100); // 200 mA in 2 mA units
+
+    const PropertyMap back = config.decode(image);
+    CHECK_EQUAL(getNumber(back, "vendor_id"), 0x1234u);
+    CHECK_EQUAL(getNumber(back, "product_id"), 0xABCDu);
+    CHECK_EQUAL(getNumber(back, "max_power"), 200u);
+}
+
+void testCh340SerialNumberIsAFixedAsciiField() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    PropertyMap values = config.decode(image);
+    values["serial_number"] = std::string("BC0042");
+    values["use_serial"] = true;
+    config.encode(values, image);
+
+    // Eight bytes of plain ASCII at 0x10, not a string descriptor.
+    CHECK_EQUAL(int(image[0x10]), 'B');
+    CHECK_EQUAL(int(image[0x15]), '2');
+    CHECK_EQUAL(int(image[0x16]), 0x00); // padded, not left over
+    CHECK_EQUAL(int(image[0x17]), 0x00);
+    CHECK_EQUAL(int(image[0x02] & 0x20), 0x00); // bit 5 clear means reported
+
+    const PropertyMap back = config.decode(image);
+    CHECK_EQUAL(getString(back, "serial_number"), std::string("BC0042"));
+    CHECK(getBool(back, "use_serial"));
+
+    // The datasheet's own test for "no serial number" is a first byte that is
+    // not printable ASCII, which is what an empty value writes.
+    values["serial_number"] = std::string();
+    config.encode(values, image);
+    CHECK_EQUAL(int(image[0x10]), 0x00);
+    CHECK_EQUAL(config.decode(image).count("serial_number"), 1u);
+    CHECK_EQUAL(getString(config.decode(image), "serial_number"), std::string());
+}
+
+void testCh340SerialNumberLimits() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    PropertyMap values = config.decode(image);
+
+    values["serial_number"] = std::string("123456789"); // nine characters
+    bool threw = false;
+    try {
+        config.encode(values, image);
+    } catch (const Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    values["serial_number"] = std::string("Brücke"); // ASCII only field
+    threw = false;
+    try {
+        config.encode(values, image);
+    } catch (const Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void testCh340ProductStringIsADescriptor() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    PropertyMap values = config.decode(image);
+    values["product"] = std::string("Brücke"); // non-ASCII on purpose
+    config.encode(values, image);
+
+    CHECK_EQUAL(int(image[0x1A]), 2 + (6 * 2)); // length byte counts the header
+    CHECK_EQUAL(int(image[0x1B]), 0x03);        // USB string descriptor type
+    CHECK_EQUAL(int(image[0x1C]), 'B');
+    CHECK_EQUAL(int(image[0x1D]), 0x00); // UTF-16LE
+    CHECK_EQUAL(getString(config.decode(image), "product"), std::string("Brücke"));
+
+    // An empty product string is the documented "use the chip's own
+    // description" marker, and it clears the field behind it.
+    values["product"] = std::string();
+    config.encode(values, image);
+    CHECK_EQUAL(int(image[0x1A]), 0x00);
+    CHECK_EQUAL(int(image[0x1C]), 0x00);
+    CHECK_EQUAL(getString(config.decode(image), "product"), std::string());
+}
+
+void testCh340ProductStringThatDoesNotFitIsRejected() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    PropertyMap values = config.decode(image);
+    values["product"] = std::string(ch34x::config::kProductChars + 1, 'x');
+
+    bool threw = false;
+    try {
+        config.encode(values, image);
+    } catch (const Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    // The descriptor has to end inside the area, which is what the cap is for.
+    CHECK(0x1A + 2 + (ch34x::config::kProductChars * 2) <= ch34x::config::kBytes);
+}
+
+void testCh340NeverWritesTheLockByte() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    image[0x03] = 0x12; // some value that is not the lock
+    PropertyMap values = config.decode(image);
+    values["vendor_id"] = uint32_t{0x1234};
+    config.encode(values, image);
+
+    // Encoding must not invent a lock byte, whatever else it changes.
+    CHECK_EQUAL(int(image[0x03]), 0x12);
+    CHECK(!ch34x::Ch340Config::isWriteProtected(image));
+
+    image[0x03] = 0x57;
+    CHECK(ch34x::Ch340Config::isWriteProtected(image));
+    CHECK(getBool(config.decode(image), "write_protected"));
+    config.encode(config.decode(image), image);
+    CHECK_EQUAL(int(image[0x03]), 0x57); // and must not clear one either
+}
+
+void testCh340HasNoChecksumButChecksTheSignature() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+
+    // Nothing is read while the signature is absent, so nothing can be wrong.
+    CHECK(config.verifyChecksum(image));
+
+    PropertyMap values = config.decode(image);
+    config.encode(values, image);
+    CHECK(config.verifyChecksum(image));
+
+    // An area the chip claims to be reading has to carry the one mode the
+    // datasheet defines; anything else is a layout we do not understand.
+    image[0x01] = 0x24;
+    CHECK(!config.verifyChecksum(image));
+}
+
+void testCh340ReservedBytesSurviveAnEdit() {
+    const ch34x::Ch340Config config;
+    std::vector<uint8_t> image = factoryCh340Area();
+    image[0x00] = 0x58; // already active, so the existing bytes are in use
+    image[0x01] = 0x23;
+    image[0x08] = 0xA5; // reserved, and none of our business
+    image[0x09] = 0x5A;
+    image[0x0F] = 0x77;
+
+    PropertyMap values = config.decode(image);
+    values["vendor_id"] = uint32_t{0x1A86};
+    config.encode(values, image);
+
+    CHECK_EQUAL(int(image[0x08]), 0xA5);
+    CHECK_EQUAL(int(image[0x09]), 0x5A);
+    CHECK_EQUAL(int(image[0x0F]), 0x77);
+}
+
+void testCh340DriverIsRegisteredAndProbes() {
+    const Registry& registry = Registry::builtin();
+    const Driver* driver = registry.byId("ch340");
+    CHECK(driver != nullptr);
+    if (driver != nullptr) {
+        CHECK(!driver->properties().empty()); // schema without a device attached
+        CHECK(!driver->description().empty());
+    }
+
+    // WCH ships every CH340 variant with the same identity, so the driver
+    // claims the family and settles the variant question on the wire.
+    usb::DeviceInfo info;
+    info.vendorId = ch34x::kVendorId;
+    info.productId = 0x7523;
+    const Driver* probed = registry.probe(info);
+    CHECK(probed != nullptr);
+    if (probed != nullptr) {
+        CHECK_EQUAL(probed->id(), std::string("ch340"));
+    }
+
+    info.vendorId = 0x0403; // an FTDI part must not land here
+    CHECK(registry.probe(info) == nullptr || registry.probe(info)->id() != "ch340");
+}
+
 void testDriverRegistry() {
     const Registry& registry = Registry::builtin();
     CHECK(registry.drivers().size() >= 2);
@@ -647,6 +891,17 @@ int main() {
         testEncodingAFactoryImageChangesNothing();
         testChangingOneSettingLeavesTheRestAlone();
         testBlankIdentityIsSeededFromTheDescriptor();
+        testCh340InactiveAreaDecodesToTheVendorDefaults();
+        testCh340EncodeActivatesTheArea();
+        testCh340IdentityAndPowerLayout();
+        testCh340SerialNumberIsAFixedAsciiField();
+        testCh340SerialNumberLimits();
+        testCh340ProductStringIsADescriptor();
+        testCh340ProductStringThatDoesNotFitIsRejected();
+        testCh340NeverWritesTheLockByte();
+        testCh340HasNoChecksumButChecksTheSignature();
+        testCh340ReservedBytesSurviveAnEdit();
+        testCh340DriverIsRegisteredAndProbes();
         testDriverRegistry();
         testPropertyParsing();
         testTextHelpers();

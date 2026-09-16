@@ -268,12 +268,17 @@ void printProperties(const std::vector<PropertySpec>& specs) {
         case PropertyType::String:
             type = "text";
             if (spec.maxChars != 0) {
-                type += " (" + std::to_string(spec.maxChars) + " characters shared by all strings)";
+                type += " (up to " + std::to_string(spec.maxChars) + " characters)";
             }
             break;
         case PropertyType::Enum:
             type = "one of:";
             break;
+        }
+        // Read only properties are listed because `info` prints them, so say
+        // which they are rather than let `set` be the one to explain.
+        if (!spec.writable) {
+            type += " (read only)";
         }
         std::cout << "  " << padRight(spec.name, 20) << spec.help << "\n";
         std::cout << "  " << padRight("", 20) << type << "\n";

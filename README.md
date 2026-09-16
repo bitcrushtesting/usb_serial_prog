@@ -21,11 +21,15 @@ to `libusb-1.0` directly and needs neither `libftdi` nor FTDI's proprietary
 | `ft232r`  | FT232R, FT245R | 128 bytes, internal | tested against hardware |
 | `ftx`     | FT230X, FT231X, FT234XD | 256 bytes | experimental, see below |
 | `ft4232h` | FT4232H | 256 bytes, external | experimental, see below |
+| `ch340`   | CH340B | 64 bytes, on-chip | detection tested; writing unconfirmed, see below |
 
 The FT-X and FT4232H layouts follow the same public description as the FT232R
 one, but have had far less exposure to real silicon. `usbprog` will not write to
 a chip whose current EEPROM contents fail the checksum this tool computes, which
 is a direct test of whether it understands the layout — see [Safety](#safety).
+
+Only the **CH340B** has settings at all; every other CH340 is fixed in mask
+ROM. See [CH340: only the B variant](#ch340-only-the-b-variant).
 
 The FT4232H has four independent UARTs and, unlike the other two families, no
 CBUS pins and no signal inverters. Its settings therefore come in per-channel
@@ -58,6 +62,97 @@ usbprog set --eeprom-size 128 vendor_id=0x0403 product_id=0x6011 product="..."
 
 Getting it wrong is safe as long as the chip is blank: a mismatch between
 `--eeprom-size` and a later measurement is reported rather than written.
+
+### CH340: only the B variant
+
+WCH gives the whole CH340 family one identity — a CH340G and a CH340B both
+enumerate as `1a86:7523`, with the same `bcdDevice` and the same chip version
+byte — but only the CH340B has a configuration area. On every other variant the
+USB identifiers live in mask ROM, and no tool can change them.
+
+Nothing in the descriptor tells the two apart, so `usbprog` asks the chip. A
+part without the memory does not return an empty area, it refuses the request
+outright, and that refusal is the test:
+
+```
+$ usbprog info
+usbprog: this chip refuses the configuration request (it reports chip version
+0x30), so it has no settings to write.
+Only the CH340B has a configuration area. The CH340, CH340G, CH340C, CH340N and
+the rest of the family hold their USB identity in mask ROM, which fixes them at
+1a86:7523 for good; no tool can change that.
+```
+
+If that is what you get, the chip on the board is not a CH340B. Replacing it is
+the only fix; a CH340B, an FT232R or an FT-X are the drop-in options depending
+on the footprint.
+
+The area itself is 64 bytes and works quite differently from an FTDI EEPROM:
+
+| Offset      | Field | Meaning |
+| ----------- | ----- | ------- |
+| `0x00`      | SIG   | `0x58` means the chip reads this area; anything else and it uses its defaults |
+| `0x01`      | MODE  | serial mode, `0x23` |
+| `0x02`      | CFG   | bit 5 disables the serial number |
+| `0x03`      | WP    | `0x57` locks the area permanently |
+| `0x04`-`0x05` | VID | little endian; `0x0000` and `0xffff` both mean "use the WCH default" |
+| `0x06`-`0x07` | PID | little endian |
+| `0x0a`      | PWR   | bus current in 2 mA units |
+| `0x10`-`0x17` | SN  | serial number, 8 plain ASCII characters — not a descriptor |
+| `0x1a`-`0x3f` | PROD | product string, as a USB string descriptor |
+
+Three consequences are worth knowing:
+
+- **There is no checksum**, so the correctness gate described under
+  [Safety](#safety) works off the signature byte instead.
+- **A factory CH340B reads as all zeroes with `SIG` clear**, which means it is
+  running on its vendor defaults. `usbprog` decodes it as those defaults rather
+  than as `0000:0000` at 0 mA, and any write sets `SIG` — otherwise the settings
+  you asked for would sit in memory the chip never looks at.
+- **`usbprog erase` clears `SIG`** rather than wiping the area. The chip goes
+  back to `1a86:7523` with its own strings, and the bytes are still there, so
+  it is the recovery path from any image you regret.
+
+`usbprog` never writes `0x57` to the WP byte, and refuses an image that carries
+one: the lock is enforced by the chip and cannot be undone.
+
+#### What has actually been tried on silicon
+
+Detection works and is proven on two chips. A CH340G (version byte `0x30`)
+**stalls** vendor request `0x54`; a CH340B (version byte `0x31`) accepts it. That
+difference is what the driver uses to tell them apart, and it is reliable.
+
+Writing is a different story, and the honest status is that it has never been
+observed to work:
+
+- The CH340B accepts every `0x54` write — no stall, no error — and **stores
+  nothing**. Writing `0xa5` to a reserved offset and reading it back returns
+  `0xff`, with the signature byte deliberately left invalid throughout, so the
+  chip was never at risk.
+- It was tried with no preamble, with the three-command pre-read preamble, with
+  the full six-command init, with a settling delay, and with four different
+  `wIndex` values. None of them changed a byte.
+- Reads return `0xff` at every address and cap out at eight bytes per transfer.
+  On a blank area a correct read is indistinguishable from a broken one, so
+  reads cannot confirm the addressing either — only a write that lands can.
+
+The most likely explanation is that the configuration interface needs an unlock
+step that is not in the public capture. Settling it needs a USB capture of WCH's
+own `CH34xSerCfg` doing a write, which is the one thing missing here.
+
+Until then the driver fails loudly rather than quietly: a write is read back,
+and if the area comes back untouched it says so and tells you the chip is
+unharmed, rather than sending you after a backup you do not need.
+
+```
+$ usbprog set serial_number=BC000001
+usbprog: the chip accepted every write and stored none of them: the
+configuration area reads exactly as it did before.
+Nothing was changed, so the chip is unharmed and needs no recovery. [...]
+```
+
+An area that reads uniformly is called out before any values are printed, so a
+table of vendor defaults is never mistaken for values read off the chip.
 
 ### Blank chips and the USB identity
 
@@ -305,15 +400,19 @@ Reprogramming an EEPROM is not risk-free, so the tool works to a few rules:
   does not model — including the factory data an FT232R keeps behind the
   strings — are preserved. Re-encoding an untouched factory image reproduces it
   byte for byte; there is a test for exactly that.
-- **The checksum is the correctness gate.** Before modifying anything, `usbprog`
+- **The checksum is the correctness gate** (on the FTDI parts). Before modifying anything, `usbprog`
   recomputes the checksum of what is already on the chip and compares it with
   the stored one. A mismatch means the tool's model of the layout is wrong (or
   the chip is blank), and it refuses to write. This is why the experimental FT-X
-  support cannot quietly corrupt a chip it does not understand.
+  support cannot quietly corrupt a chip it does not understand. The CH340B has
+  no checksum; there the signature byte plays the same role, and a chip whose
+  signature is clear is one that is running on its vendor defaults.
 - **Every write is read back and verified**, byte for byte.
 - **Recovery**: an FTDI chip with an invalid checksum falls back to its factory
   defaults (`0403:6001` for an FT232R) instead of disappearing, so a bad image
-  is recoverable. Write your backup, or `usbprog erase` and start over.
+  is recoverable. Write your backup, or `usbprog erase` and start over. A
+  CH340B does the same when its signature byte is clear, and it is written last
+  on every write, so an interrupted write leaves a chip that still enumerates.
 
 `--force` overrides the checksum gate when you know what you are doing.
 
@@ -425,6 +524,14 @@ GPL-2.0-only. Copyright (C) 2026 Bitcrush Testing. See [LICENSE](LICENSE) for
 the full text, and the SPDX header in each source file.
 
 ## Credits
+
+The CH340B configuration layout is the one in WCH's own "CH340 Datasheet (I)",
+section 5.2. The transport that reaches it — vendor request `0x54`, the address
+in the high half of `wValue` — is not documented by WCH and comes from USB
+captures of their `CH34xSerCfg` tool. On the CH340B tested here that transport
+reads and writes without error but does not move a byte, so treat it as
+unconfirmed — see [What has actually been tried on
+silicon](#what-has-actually-been-tried-on-silicon).
 
 The FT232R EEPROM layout is the one documented by the
 [libftdi](https://www.intra2net.com/en/developer/libftdi/) project and FTDI's
