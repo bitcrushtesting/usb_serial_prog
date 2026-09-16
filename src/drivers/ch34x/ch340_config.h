@@ -97,7 +97,7 @@ class Ch340Config {
 public:
     Ch340Config();
 
-    static std::size_t size() { return config::kBytes; }
+    std::size_t size() const { return config::kBytes; }
     const std::vector<PropertySpec>& properties() const { return properties_; }
 
     PropertyMap decode(std::span<const uint8_t> image) const;
@@ -117,7 +117,7 @@ public:
 
 private:
     void addProperty(PropertySpec spec);
-    static void requireSize(std::size_t size);
+    void requireSize(std::size_t size) const;
 
     std::vector<PropertySpec> properties_;
 };
