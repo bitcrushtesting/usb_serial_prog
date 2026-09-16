@@ -153,7 +153,7 @@ void Codec::addCommonProperties() {
 }
 
 std::vector<std::string> Codec::seedIdentity(PropertyMap& values, uint16_t reportedVendorId,
-                                             uint16_t reportedProductId) {
+                                             uint16_t reportedProductId) const {
     struct Seed {
         const char* name;
         uint16_t reported;

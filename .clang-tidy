@@ -33,6 +33,7 @@ Checks: >
   -readability-function-cognitive-complexity,
   -readability-avoid-nested-conditional-operator,
   -readability-braces-around-statements,
+  -readability-convert-member-functions-to-static,
   -readability-implicit-bool-conversion,
   -readability-redundant-member-init,
   -readability-simplify-boolean-expr,
