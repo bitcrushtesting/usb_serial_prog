@@ -186,7 +186,7 @@ Ch340Config::Ch340Config() {
 
 void Ch340Config::addProperty(PropertySpec spec) { properties_.push_back(std::move(spec)); }
 
-void Ch340Config::requireSize(std::size_t size) const {
+void Ch340Config::requireSize(std::size_t size) {
     if (size != config::kBytes) {
         throw Error("CH340B configuration image has " + std::to_string(size) + " bytes, expected " +
                     std::to_string(config::kBytes));

@@ -320,9 +320,15 @@ private:
         try {
             return readConfigByte(handle, addr::kSig);
         } catch (const UsbError&) {
-            // Fall through to the retry below.
+            // The plain request is the one that leaves the UART alone, so it
+            // gets the first try; a stall here is not yet a verdict.
+            return readSignatureAfterPreamble(handle);
         }
+    }
 
+    /// The retry, for a chip that refused the plain request. If the preamble
+    /// does not help either, the chip has no configuration area to reach.
+    static uint8_t readSignatureAfterPreamble(usb::Handle& handle) {
         try {
             prepare(handle);
             return readConfigByte(handle, addr::kSig);
@@ -343,15 +349,19 @@ private:
         return true;
     }
 
-    static std::string describeMissingConfigArea(usb::Handle& handle) {
-        std::string version;
+    /// The chip version, as a parenthesised aside for the message below. It is
+    /// a nicety, so a chip that will not even answer this yields an empty
+    /// string rather than masking the real diagnosis.
+    static std::string describeVersion(usb::Handle& handle) {
         try {
-            version = " (it reports chip version 0x" + text::hex8(readVersion(handle)) + ")";
+            return " (it reports chip version 0x" + text::hex8(readVersion(handle)) + ")";
         } catch (const Error&) {
-            // The version is a nicety; its absence must not mask the real
-            // diagnosis below.
+            return {};
         }
-        return "this chip refuses the configuration request" + version +
+    }
+
+    static std::string describeMissingConfigArea(usb::Handle& handle) {
+        return "this chip refuses the configuration request" + describeVersion(handle) +
                ", so it has no settings to write.\n"
                "Only the CH340B has a configuration area. The CH340, CH340G, CH340C, CH340N and "
                "the rest of the family hold their USB identity in mask ROM, which fixes them at "

@@ -137,8 +137,8 @@ public:
     /// are left alone, as is a reported ID that is itself blank — that means
     /// the device has already been stranded and there is nothing to copy.
     /// Returns the properties actually filled in.
-    std::vector<std::string> seedIdentity(PropertyMap& values, uint16_t reportedVendorId,
-                                          uint16_t reportedProductId) const;
+    static std::vector<std::string> seedIdentity(PropertyMap& values, uint16_t reportedVendorId,
+                                                 uint16_t reportedProductId);
 
 protected:
     void addProperty(PropertySpec spec);

@@ -558,7 +558,7 @@ void testCh340InactiveAreaDecodesToTheVendorDefaults() {
 void testCh340EncodeActivatesTheArea() {
     const ch34x::Ch340Config config;
     std::vector<uint8_t> image = factoryCh340Area();
-    PropertyMap values = config.decode(image);
+    const PropertyMap values = config.decode(image);
     config.encode(values, image);
 
     // Settings the chip is not reading are not settings, so an encode always
@@ -716,7 +716,7 @@ void testCh340HasNoChecksumButChecksTheSignature() {
     // Nothing is read while the signature is absent, so nothing can be wrong.
     CHECK(config.verifyChecksum(image));
 
-    PropertyMap values = config.decode(image);
+    const PropertyMap values = config.decode(image);
     config.encode(values, image);
     CHECK(config.verifyChecksum(image));
 
