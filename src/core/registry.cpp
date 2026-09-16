@@ -19,6 +19,7 @@
 
 #include "core/error.h"
 #include "core/text.h"
+#include "drivers/ch34x/ch34x_driver.h"
 #include "drivers/ftdi/ftdi_driver.h"
 
 #include <algorithm>
@@ -69,6 +70,9 @@ const Registry& Registry::builtin() {
     return kRegistry;
 }
 
-void registerBuiltinDrivers(Registry& registry) { ftdi::registerDrivers(registry); }
+void registerBuiltinDrivers(Registry& registry) {
+    ftdi::registerDrivers(registry);
+    ch34x::registerDrivers(registry);
+}
 
 } // namespace usbprog

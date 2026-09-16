@@ -49,6 +49,8 @@ add_library(usbprog_core STATIC
   src/core/registry.cpp
   src/core/text.cpp
   src/core/usb.cpp
+  src/drivers/ch34x/ch340_config.cpp
+  src/drivers/ch34x/ch34x_driver.cpp
   src/drivers/ftdi/ft232r.cpp
   src/drivers/ftdi/ft4232h.cpp
   src/drivers/ftdi/ftdi_codec.cpp
