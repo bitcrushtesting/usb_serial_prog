@@ -91,8 +91,9 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       # Scope: everything the unit tests can reach. The libusb transport
-      # (core/usb.cpp, ftdi_driver.cpp) needs a real device, and src/cli is
-      # exercised by the smoke test in the build job, so neither is counted.
+      # (core/usb.cpp, and the per-family driver that drives it) needs a real
+      # device, and src/cli is exercised by the smoke test in the build job, so
+      # neither is counted. Every new chip family adds one more such driver.
       - name: Report
         run: |
           mkdir -p coverage
@@ -100,6 +101,7 @@ jobs:
             --filter 'src/core/' --filter 'src/drivers/' \
             --exclude 'src/core/usb\.(cpp|h)' \
             --exclude 'src/drivers/ftdi/ftdi_driver\.cpp' \
+            --exclude 'src/drivers/ch34x/ch34x_driver\.cpp' \
             --txt coverage/coverage.txt \
             --html-details coverage/index.html \
             --json-summary coverage/summary.json \
